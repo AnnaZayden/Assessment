@@ -21,6 +21,10 @@ strict = true
 files = ["app", "image_client"]
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+module = "imageio_ffmpeg"
+ignore_missing_imports = true  # ships no type hints; we only call get_ffmpeg_exe()
+
 [tool.pytest.ini_options]
 filterwarnings = ["ignore:.*install `httpx2`.*"]
 
