@@ -44,6 +44,10 @@ class Settings(BaseModel):
     max_concurrent_decodes: Positive = 4
     max_pending_renders: Positive = 128  # beyond this, shed load with 503 instead of queueing
 
+    # --- Video thumbnails --------------------------------------------------
+    max_video_bytes: Positive = 50 * 1024 * 1024
+    video_timeout_s: PositiveSeconds = 10.0  # for ffmpeg to find and decode one frame
+
     # --- Caching -----------------------------------------------------------
     cache_max_bytes: Positive = 256 * 1024 * 1024
     cache_ttl_s: Positive = 3600

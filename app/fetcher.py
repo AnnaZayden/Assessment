@@ -69,29 +69,31 @@ class Fetcher:
             # opened (and TLS-verified) for a.com could be reused for b.com on
             # the same CDN IP.
             limits=httpx.Limits(max_keepalive_connections=0),
-            headers={"User-Agent": USER_AGENT, "Accept": "image/*"},
+            headers={"User-Agent": USER_AGENT},
         )
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def fetch(self, url: str) -> FetchedImage:
+    async def fetch(self, url: str, *, video: bool = False) -> FetchedImage:
         timeout = self._settings.fetch_timeout_s
+        kind = "video" if video else "image"
         try:
-            return await asyncio.wait_for(self._fetch(url), timeout=timeout)
+            return await asyncio.wait_for(self._fetch(url, kind), timeout=timeout)
         except (TimeoutError, httpx.TimeoutException):
             raise ApiError(
-                ErrorCode.UPSTREAM_TIMEOUT, f"Fetching the source image took longer than {timeout:g}s."
+                ErrorCode.UPSTREAM_TIMEOUT, f"Fetching the source {kind} took longer than {timeout:g}s."
             ) from None
         except httpx.HTTPError as exc:
             raise ApiError(
-                ErrorCode.UPSTREAM_UNREACHABLE, f"Could not fetch the source image: {type(exc).__name__}."
+                ErrorCode.UPSTREAM_UNREACHABLE, f"Could not fetch the source {kind}: {type(exc).__name__}."
             ) from None
 
-    async def _fetch(self, url: str) -> FetchedImage:
+    async def _fetch(self, url: str, kind: str) -> FetchedImage:
         current = url
         for hop in range(self._settings.max_redirects + 1):
             request = await self._pinned_request(current, via_redirect=hop > 0)
+            request.headers["Accept"] = f"{kind}/*"
             response = await self._client.send(request, stream=True)
             try:
                 if response.status_code in REDIRECT_STATUSES:
@@ -108,7 +110,7 @@ class Fetcher:
                         f"Source responded with HTTP {response.status_code}.",
                         upstream_status=response.status_code,
                     )
-                data = await self._read_limited(response)
+                data = await self._read_limited(response, kind)
                 return FetchedImage(data, response.headers.get("content-type"), current)
             finally:
                 await response.aclose()
@@ -161,10 +163,10 @@ class Fetcher:
             )
         return addresses[0]
 
-    async def _read_limited(self, response: httpx.Response) -> bytes:
-        limit = self._settings.max_source_bytes
+    async def _read_limited(self, response: httpx.Response, kind: str) -> bytes:
+        limit = self._settings.max_video_bytes if kind == "video" else self._settings.max_source_bytes
         too_large = ApiError(
-            ErrorCode.SOURCE_TOO_LARGE, f"Source image is larger than the {_human_bytes(limit)} limit."
+            ErrorCode.SOURCE_TOO_LARGE, f"Source {kind} is larger than the {_human_bytes(limit)} limit."
         )
         declared = response.headers.get("content-length", "")
         if declared.isdigit() and int(declared) > limit:

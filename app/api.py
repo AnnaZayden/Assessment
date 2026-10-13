@@ -14,7 +14,14 @@ from .config import Settings
 from .errors import ApiError, ErrorCode
 from .formats import INPUT_FORMATS, OUTPUT_FORMATS
 from .observability import Metrics
-from .params import CROP_MODES, PARAMETER_NAMES, ProcessParams, openapi_parameters, parse_process_params
+from .params import (
+    CROP_MODES,
+    PARAMETER_NAMES,
+    ProcessParams,
+    ThumbnailQuery,
+    openapi_parameters,
+    parse_process_params,
+)
 from .ratelimit import RateLimiter
 from .service import CacheStatus, ImageService, RenderedImage
 
@@ -85,8 +92,23 @@ router = APIRouter()
     openapi_extra={"parameters": openapi_parameters()},
 )
 async def process(request: Request, ctx: Ctx) -> Response:
+    return await render(request, ctx, video=False)
+
+
+@router.get(
+    "/video/thumbnail",
+    summary="Grab one frame of a video as a resized image",
+    dependencies=[Depends(enforce_rate_limit)],
+    responses={200: {"content": {"image/*": {}}, "description": "The frame, as image bytes."}},
+    openapi_extra={"parameters": openapi_parameters(ThumbnailQuery)},
+)
+async def video_thumbnail(request: Request, ctx: Ctx) -> Response:
+    return await render(request, ctx, video=True)
+
+
+async def render(request: Request, ctx: Ctx, *, video: bool) -> Response:
     params = parse_process_params(
-        request.query_params.multi_items(), ctx.settings, request.headers.get("accept")
+        request.query_params.multi_items(), ctx.settings, request.headers.get("accept"), video=video
     )
     log_fields = request_info(request).log_fields
     log_fields["source_host"] = source_host(params.url)
@@ -94,13 +116,6 @@ async def process(request: Request, ctx: Ctx) -> Response:
     ctx.metrics.observe_cache(cache_status)
     log_fields["cache"] = cache_status
     return image_response(request, image, cache_status, params, ctx.settings)
-
-
-@router.get("/video/thumbnail", summary="Not implemented (see README)")
-async def video_thumbnail() -> Response:
-    raise ApiError(
-        ErrorCode.NOT_IMPLEMENTED, "Video thumbnails are not implemented in this version; see the README."
-    )
 
 
 @router.get("/limits", summary="The limits this instance enforces")

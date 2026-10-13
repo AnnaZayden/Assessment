@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Final, Literal, get_args
@@ -20,6 +21,9 @@ AUTO_FORMAT: Final = "auto"
 MAX_QUALITY: Final = 100
 # Every numeric limit fits in 6 digits; refusing longer strings keeps int() cheap on hostile input.
 MAX_INT_DIGITS: Final = 6
+MAX_TIME_S: Final = 86400
+TIME_PATTERN: Final = re.compile(r"[0-9]{1,5}(\.[0-9]{1,3})?")  # "5", "1.5": ASCII only
+VIDEO_DEFAULT_FORMAT: Final = "jpeg"
 URL_REQUIRED: Final = (
     "The 'url' query parameter is required, e.g. /process?url=https://example.com/cat.jpg&width=400."
 )
@@ -36,10 +40,12 @@ class ProcessParams:
     format: OutputFormat | None = None  # None = keep the source format when we can encode it
     crop: CropMode = "fit"
     negotiated: bool = False  # the format came from the Accept header, so the response varies by it
+    time: float | None = None  # set for video thumbnails: which second to grab
 
     def cache_key(self) -> str:
         return "\x1f".join(
-            str(v) for v in (self.url, self.width, self.height, self.format, self.quality, self.crop)
+            str(v)
+            for v in (self.url, self.width, self.height, self.format, self.quality, self.crop, self.time)
         )
 
 
@@ -121,6 +127,28 @@ class ProcessQuery(BaseModel):
         return mode
 
 
+class ThumbnailQuery(ProcessQuery):
+    """/video/thumbnail: the /process parameters plus which moment of the video to grab."""
+
+    url: str = Field(description="http(s) URL of the source video (MP4, MOV, WebM, MKV or AVI).")
+    format: OutputFormat | Literal["auto"] | None = Field(
+        None, description="Output format, as for /process. Default: jpeg."
+    )
+    time: float | None = Field(
+        None, description="Seconds into the video, e.g. 1.5. Default: the first frame."
+    )
+
+    @field_validator("time", mode="before")
+    @classmethod
+    def _check_time(cls, value: str) -> float:
+        if not TIME_PATTERN.fullmatch(value) or float(value) > MAX_TIME_S:
+            raise _error(
+                ErrorCode.INVALID_PARAMETER,
+                f"'time' must be a number of seconds between 0 and {MAX_TIME_S}, got '{value}'.",
+            )
+        return float(value)
+
+
 PARAMETER_NAMES: Final[tuple[str, ...]] = tuple(ProcessQuery.model_fields)
 _CUSTOM_CODES: Final = {
     c.code: c for c in (ErrorCode.MISSING_PARAMETER, ErrorCode.INVALID_PARAMETER, ErrorCode.INVALID_URL)
@@ -133,7 +161,7 @@ def _is_plain_int(raw: str) -> bool:
 
 
 def parse_process_params(
-    items: Iterable[tuple[str, str]], settings: Settings, accept: str | None = None
+    items: Iterable[tuple[str, str]], settings: Settings, accept: str | None = None, *, video: bool = False
 ) -> ProcessParams:
     values: dict[str, str] = {}
     for key, value in items:
@@ -142,12 +170,17 @@ def parse_process_params(
                 ErrorCode.DUPLICATE_PARAMETER, f"Query parameter '{key}' was given more than once.", param=key
             )
         values[key] = value.strip()
+    model = ThumbnailQuery if video else ProcessQuery
     try:
-        query = ProcessQuery.model_validate(values, context={"settings": settings})
+        query = model.model_validate(values, context={"settings": settings})
     except ValidationError as exc:
-        raise _to_api_error(exc) from None
+        raise _to_api_error(exc, tuple(model.model_fields)) from None
 
     fmt, negotiated = _resolve_format(query.format, accept)
+    time = None
+    if isinstance(query, ThumbnailQuery):
+        time = query.time or 0.0
+        fmt = fmt or VIDEO_DEFAULT_FORMAT  # a frame has no "source format" worth keeping
     return ProcessParams(
         url=query.url,
         quality=query.quality or settings.default_quality,
@@ -156,15 +189,16 @@ def parse_process_params(
         format=fmt,
         crop=query.crop or "fit",
         negotiated=negotiated,
+        time=time,
     )
 
 
-def _to_api_error(exc: ValidationError) -> ApiError:
+def _to_api_error(exc: ValidationError, names: tuple[str, ...]) -> ApiError:
     # Report one problem at a time, unknown parameters first: they usually explain the others (typos).
     first = min(exc.errors(), key=lambda e: e["type"] != "extra_forbidden")
     param = str(first["loc"][0])
     if first["type"] == "extra_forbidden":
-        allowed = ", ".join(PARAMETER_NAMES)
+        allowed = ", ".join(names)
         return ApiError(
             ErrorCode.UNKNOWN_PARAMETER,
             f"Unknown query parameter '{param}'. Allowed parameters: {allowed}.",
@@ -207,9 +241,9 @@ def _parse_q(value: str) -> float:
         return 0.0
 
 
-def openapi_parameters() -> list[dict[str, Any]]:
-    """OpenAPI query parameters generated from ProcessQuery, so the docs cannot drift from validation."""
-    schema = ProcessQuery.model_json_schema()
+def openapi_parameters(model: type[ProcessQuery] = ProcessQuery) -> list[dict[str, Any]]:
+    """OpenAPI query parameters generated from the query model, so the docs cannot drift from validation."""
+    schema = model.model_json_schema()
     return [
         {
             "name": name,
@@ -218,5 +252,5 @@ def openapi_parameters() -> list[dict[str, Any]]:
             "description": field.description,
             "schema": {k: v for k, v in schema["properties"][name].items() if k != "description"},
         }
-        for name, field in ProcessQuery.model_fields.items()
+        for name, field in model.model_fields.items()
     ]

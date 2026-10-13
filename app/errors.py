@@ -27,10 +27,10 @@ class ErrorCode(Enum):
     SOURCE_TOO_MANY_PIXELS = ("source_too_many_pixels", 422)
     OUTPUT_TOO_LARGE = ("output_too_large", 422)
     CORRUPT_IMAGE = ("corrupt_image", 422)
+    PROCESSING_TIMEOUT = ("processing_timeout", 422)
     RATE_LIMITED = ("rate_limited", 429)
     # 5xx: our side, or the source's side; retrying later may work.
     INTERNAL_ERROR = ("internal_error", 500)
-    NOT_IMPLEMENTED = ("not_implemented", 501)
     UPSTREAM_ERROR = ("upstream_error", 502)
     UPSTREAM_UNREACHABLE = ("upstream_unreachable", 502)
     DNS_ERROR = ("dns_error", 502)

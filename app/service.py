@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final
 
@@ -17,6 +17,7 @@ from .fetcher import Fetcher
 from .formats import OutputFormat
 from .params import ProcessParams
 from .processor import SourceInfo, process_image
+from .video import extract_frame
 
 ETAG_HEX_CHARS: Final = 32  # 128 bits of SHA-256: collision-safe, and shorter headers
 BUSY_RETRY_AFTER_S: Final = 1
@@ -98,9 +99,15 @@ class ImageService:
             del self._inflight[key]
 
     async def _render(self, params: ProcessParams) -> RenderedImage:
+        video = params.time is not None
         async with self._fetch_slots:
-            fetched = await self._fetcher.fetch(params.url)
+            fetched = await self._fetcher.fetch(params.url, video=video)
+        # ffmpeg is as CPU- and memory-hungry as a decode, so it shares the decode slots.
         async with self._decode_slots:
-            out = await run_in_threadpool(process_image, fetched.data, params, self._settings)
+            image_data = fetched.data
+            if params.time is not None:
+                image_data = await extract_frame(fetched.data, params.time, self._settings)
+            out = await run_in_threadpool(process_image, image_data, params, self._settings)
+        source = replace(out.source, format="video", bytes=len(fetched.data)) if video else out.source
         etag = '"' + hashlib.sha256(out.data).hexdigest()[:ETAG_HEX_CHARS] + '"'
-        return RenderedImage(out.data, out.content_type, out.format, out.width, out.height, etag, out.source)
+        return RenderedImage(out.data, out.content_type, out.format, out.width, out.height, etag, source)
