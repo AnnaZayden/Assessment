@@ -1,4 +1,22 @@
-# Tool configuration only; dependencies are pinned in requirements*.txt.
+[project]
+name = "ours-image-service"
+version = "0.1.0"
+requires-python = ">=3.13"
+
+[tool.setuptools.packages.find]
+include = ["app*", "image_client*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "coverage==7.16.2",
+    "playwright==1.63.0",
+    "trustme==1.2.1",
+    "ruff==0.17.0",
+    "mypy==2.4.0",
+]
+
+# Tool configuration only; runtime dependencies are in requirements.txt.
 
 [tool.ruff]
 line-length = 110

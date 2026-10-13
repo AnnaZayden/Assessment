@@ -10,7 +10,7 @@ GET /video/thumbnail?url=https://www.w3schools.com/html/mov_bbb.mp4&time=3&width
 ## Run it
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -e ".[dev]"
 .venv/bin/python -m app
 ```
 
@@ -100,8 +100,3 @@ image_client/ a small Python client for the API
 static/       the web UI
 tests/        tests
 ```
-
-## Not done yet
-
-- API keys or signed URLs
-- A shared cache (Redis or a CDN) for running more than one instance
