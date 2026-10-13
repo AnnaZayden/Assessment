@@ -30,7 +30,7 @@ class FakeFetcher:
         self.release = asyncio.Event()
         self.block = False
 
-    async def fetch(self, url: str) -> FetchedImage:
+    async def fetch(self, url: str, *, video: bool = False) -> FetchedImage:
         self.calls += 1
         self.active += 1
         self.peak = max(self.peak, self.active)

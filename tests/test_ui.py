@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import socket
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -12,22 +13,30 @@ from collections.abc import Iterator
 import httpx
 import pytest
 import uvicorn
-from playwright.sync_api import Browser, Error, Page, expect, sync_playwright
+from playwright.sync_api import Browser, Error, Page, Route, expect, sync_playwright
 
 from app.config import Settings
 from app.fetcher import Fetcher
 from app.main import create_app
+from app.video import FFMPEG
 
 from .conftest import Upstream
 from .helpers import make_image
 
 PHOTO = make_image(size=(800, 600))
+# WebM/VP8, because Playwright's Chromium can't play H.264 MP4.
+VIDEO = subprocess.run(  # noqa: S603 - fixed arguments, our own ffmpeg
+    [FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10", "-t", "2",
+     "-c:v", "libvpx", "-b:v", "200k", "-f", "webm", "-"],
+    check=True, capture_output=True,
+).stdout  # fmt: skip
 
 
 @pytest.fixture(scope="module")
 def upstream() -> Upstream:
     up = Upstream()
     up.image("img.test", "/photo.jpg", PHOTO)
+    up.image("img.test", "/clip.webm", VIDEO, "video/webm")
     up.add(
         "img.test", "/page", httpx.Response(200, text="<html></html>", headers={"content-type": "text/html"})
     )
@@ -69,12 +78,29 @@ def browser() -> Iterator[Browser]:
         b.close()
 
 
+def serve_video(route: Route) -> None:
+    """Like a real host, answer byte-range requests: browsers need them to seek."""
+    match = re.fullmatch(r"bytes=(\d+)-(\d*)", route.request.headers.get("range", ""))
+    if not match:
+        route.fulfill(body=VIDEO, content_type="video/webm", headers={"accept-ranges": "bytes"})
+        return
+    start = int(match[1])
+    end = int(match[2]) if match[2] else len(VIDEO) - 1
+    route.fulfill(
+        status=206,
+        body=VIDEO[start : end + 1],
+        content_type="video/webm",
+        headers={"accept-ranges": "bytes", "content-range": f"bytes {start}-{end}/{len(VIDEO)}"},
+    )
+
+
 @pytest.fixture
 def page(browser: Browser, server: str) -> Iterator[Page]:
     context = browser.new_context(base_url=server, permissions=["clipboard-read", "clipboard-write"])
     pg = context.new_page()
     # The original image is loaded straight from its source; serve the fake host's bytes to the browser too.
     pg.route("https://img.test/**", lambda route: route.fulfill(body=PHOTO, content_type="image/jpeg"))
+    pg.route("https://img.test/clip.webm", serve_video)
     pg.goto("/")
     yield pg
     context.close()
@@ -91,8 +117,8 @@ def process(page: Page, url: str, **fields: str) -> None:
 
 
 def test_empty_state(page: Page):
-    expect(page.locator("#original-stage")).to_contain_text("The source image appears here.")
-    expect(page.locator("#stage")).to_contain_text("Pick a sample or paste an image URL")
+    expect(page.locator("#original-stage")).to_contain_text("The source appears here.")
+    expect(page.locator("#stage")).to_contain_text("Pick a sample or paste an image or video URL")
     for dl in ("#original-meta", "#meta", "#summary"):
         expect(page.locator(dl)).to_be_hidden()
 
@@ -244,3 +270,83 @@ def test_size_change_is_signed(page: Page):
     expect(page.locator("#meta")).to_contain_text(
         re.compile(r"vs original\s*\+\d+% \(\d+\.\d× larger\)", re.IGNORECASE)
     )
+
+
+def test_video_mode_switches_the_endpoint_and_shows_the_time_field(page: Page):
+    expect(page.locator("#time")).to_be_hidden()
+    page.fill("#url", "https://img.test/clip.webm")
+    page.fill("#width", "200")
+    expect(page.locator("#request-url")).to_have_text(
+        "/video/thumbnail?url=https%3A%2F%2Fimg.test%2Fclip.webm&width=200"
+    )
+    expect(page.locator("#mode-video")).to_be_checked()
+    expect(page.locator("#url-label")).to_have_text("Video URL")
+    expect(page.locator("#submit")).to_have_text("Process video")
+    page.fill("#time", "1.5")
+    expect(page.locator("#request-url")).to_contain_text("&time=1.5")
+
+    page.click("label[for=mode-image]")
+    expect(page.locator("#time")).to_be_hidden()
+    expect(page.locator("#submit")).to_have_text("Process image")
+    expect(page.locator("#request-url")).to_have_text(
+        "/process?url=https%3A%2F%2Fimg.test%2Fclip.webm&width=200"
+    )
+
+
+def test_pasting_a_link_picks_the_mode(page: Page):
+    page.fill("#url", "https://img.test/clip.mp4?token=1")
+    expect(page.locator("#mode-video")).to_be_checked()
+    page.fill("#url", "https://img.test/photo.JPG")
+    expect(page.locator("#mode-image")).to_be_checked()
+    page.click("label[for=mode-video]")
+    page.fill("#url", "https://img.test/no-extension")  # no hint: the chosen mode stays
+    expect(page.locator("#mode-video")).to_be_checked()
+
+
+def test_video_sample_selects_video_mode(page: Page):
+    page.click("text=Video (MP4)")
+    expect(page.locator("#mode-video")).to_be_checked()
+    page.click("text=Transparent PNG")
+    expect(page.locator("#mode-image")).to_be_checked()
+
+
+def test_video_thumbnail_is_shown_next_to_the_video(page: Page):
+    page.fill("#url", "https://img.test/clip.webm")
+    page.fill("#time", "1")
+    page.fill("#width", "160")
+    page.click("#submit")
+    processed = page.locator("#meta")
+    expect(processed).to_contain_text("160 × 120")
+    expect(processed).to_contain_text("jpeg")
+    expect(page.locator("#original-meta")).to_contain_text("320 × 240")
+    expect(page.locator("#original-meta")).to_contain_text("video")
+    expect(page.locator("#original-scale")).to_have_text(
+        "Original video, paused at 1s. Press play to watch it."
+    )
+    video = page.locator("#original-stage video")
+    expect(video).to_be_visible()
+    page.wait_for_function("document.querySelector('#original-stage video').currentTime >= 1")
+    expect(page.locator("#stage img")).to_be_visible()
+    expect(page.locator("#submit")).to_have_text("Process video")
+
+
+def test_unplayable_original_video_is_explained(page: Page):
+    page.route("https://img.test/clip.webm", lambda route: route.abort())
+    page.fill("#url", "https://img.test/clip.webm")
+    page.click("#submit")
+    expect(page.locator("#original-stage")).to_contain_text("can't play the video here")
+    expect(page.locator("#meta")).to_be_visible()
+
+
+def test_video_errors_are_shown(page: Page, server: str):
+    seen: list[str] = []
+    page.on("request", lambda request: seen.append(request.url))
+    page.fill("#url", "https://img.test/clip.webm")
+    page.fill("#time", "60")
+    page.click("#submit")
+    expect(page.locator("#stage .error")).to_contain_text("400 · invalid_parameter")
+    expect(page.locator("#stage .error")).to_contain_text("no frame at 60s")
+    expect(page.locator("#original-stage")).to_contain_text("No source video to show.")
+    assert [u.removeprefix(server).split("?")[0] for u in seen if u.startswith(server)] == [
+        "/video/thumbnail"
+    ]

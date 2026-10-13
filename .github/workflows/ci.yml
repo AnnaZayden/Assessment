@@ -53,6 +53,17 @@ jobs:
           for _ in $(seq 30); do curl -fs localhost:8000/healthz && break; sleep 1; done
           curl -fs localhost:8000/healthz | grep -q '"version":"${{ github.sha }}"'
           curl -fs localhost:8000/limits > /dev/null
+      - name: ffmpeg works inside the container, under its memory and CPU caps
+        run: |
+          docker run --rm image-service python -c "
+          import asyncio, subprocess
+          from app.config import Settings
+          from app.video import FFMPEG, extract_frame
+          subprocess.run([FFMPEG, '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=10',
+                          '-t', '1', '-pix_fmt', 'yuv420p', '/tmp/v.mp4'], check=True)
+          frame = asyncio.run(extract_frame(open('/tmp/v.mp4', 'rb').read(), 0.5, Settings()))
+          assert frame.startswith(b'\\x89PNG'), frame[:8]
+          "
 
   publish:
     needs: [lint, test, docker]

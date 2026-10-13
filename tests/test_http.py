@@ -140,12 +140,6 @@ def test_unknown_route_uses_error_format(client):
     assert error_of(r)["code"] == "not_found"
 
 
-def test_video_thumbnail_not_implemented(client):
-    r = client.get("/video/thumbnail", params={"url": "https://img.test/v.mp4"})
-    assert r.status_code == 501
-    assert error_of(r)["code"] == "not_implemented"
-
-
 def test_limits_endpoint(client):
     body = client.get("/limits").json()
     assert body["limits"]["max_output_dimension"] == 4000
