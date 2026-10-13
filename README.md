@@ -10,7 +10,7 @@ GET /video/thumbnail?url=https://www.w3schools.com/html/mov_bbb.mp4&time=3&width
 ## Run it
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt ".[dev]"
 .venv/bin/python -m app
 ```
 
