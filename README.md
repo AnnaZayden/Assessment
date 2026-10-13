@@ -12,7 +12,7 @@ GET /process?url=https://picsum.photos/id/1025/1600/1067&width=800&height=600&fo
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m app           # http://127.0.0.1:8000  (UI at /, OpenAPI docs at /docs)
 .venv/bin/python -m playwright install chromium   # once, for the UI tests (or have Google Chrome installed)
-.venv/bin/python -m pytest        # 242 tests, no network needed
+.venv/bin/python -m pytest        # 248 tests, no network needed
 ```
 
 Logs are JSON, one line per request, each with a request ID.
@@ -38,9 +38,45 @@ All tool settings live in `pyproject.toml`.
 - `test_client.py`: the Python client SDK.
 - `test_ui.py`: the web UI in headless Chromium against a live server.
 - **Coverage and break-checks:** line and branch coverage of `app/` and `image_client/` is 100%. Each security check was also broken on purpose to confirm a test fails.
-- **CI** (`.github/workflows/ci.yml`) runs lint, types, tests and coverage on every push, then builds the Docker image and checks that the container answers `/healthz`.
+- **CI** (`.github/workflows/ci.yml`) runs lint, types, tests and coverage on every push and pull request, and builds the Docker image and checks that the container answers `/healthz` with the right commit. See [Deployment](#deployment-cicd) for what happens after that on `main`.
 
 Stack: Python 3.13+, FastAPI, httpx (fetching), and Pillow (decode/encode). I wrote it in Python because that is what the machine I built it on had installed. With Node, the equivalent would be Fastify plus sharp/libvips, which is also faster at resizing.
+
+## Deployment (CI/CD)
+
+Every push to `main` that passes all checks is shipped automatically. A failing commit never ships, because the later jobs wait for every check to pass.
+
+```
+push ──► lint ─┐
+         test ─┼─► publish ──► deploy
+       docker ─┘   (ghcr.io)   (Render)
+```
+
+1. **lint, test, docker** run on every push and pull request.
+2. **publish** (only on `main`) builds the image and pushes it to the GitHub Container Registry as `ghcr.io/annazayden/ours-image-service:sha-<commit>` and `:latest`. It uses the workflow's own token, so no secret is needed. The package is private while the repository is.
+   ```bash
+   docker run -p 8000:8000 ghcr.io/annazayden/ours-image-service:latest   # after: gh auth token | docker login ghcr.io -u <user> --password-stdin
+   ```
+3. **deploy** triggers a deploy on Render. It then waits until `/healthz` reports the new commit as its `version`, and smoke-tests `/limits` and a real `/process` request.
+
+### One-time setup for the deploy job
+
+Until this is done, the deploy job is skipped with a notice and CI stays green.
+
+1. **Create the service.** On [Render](https://render.com), sign in with GitHub, choose **New → Blueprint** and pick this repository. [`render.yaml`](render.yaml) defines the service: Docker, free plan, health check on `/healthz`, and auto-deploy **off**, so only CI deploys.
+2. **Store the deploy hook as a secret.** In the service's **Settings → Deploy Hook**, copy the URL. It's a secret, because anyone holding it can trigger deploys. Store it as a GitHub secret, never in the code:
+   ```bash
+   gh secret set RENDER_DEPLOY_HOOK_URL   # paste the URL when prompted
+   ```
+3. **Tell CI the public URL,** so it can confirm each deploy went live (this one isn't a secret):
+   ```bash
+   gh variable set PUBLIC_URL --body https://<your-service>.onrender.com
+   ```
+
+**Notes on the free plan:**
+- **Cold starts:** it sleeps after about 15 minutes without traffic, so the first request after that takes up to about a minute.
+- **Memory:** it has 512 MB of RAM, so `render.yaml` lowers the concurrency and cache limits to keep the worst case well under that.
+- **Rate limiting:** it trusts `X-Forwarded-For` from Render's proxy, so each visitor is rate-limited separately. After the first deploy, check that it's working: the `rate_limit_tracked_clients` value on `/metrics` should rise as different visitors use the service.
 
 ## API
 
