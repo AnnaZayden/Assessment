@@ -105,7 +105,7 @@ async def video_thumbnail() -> Response:
 
 @router.get("/limits", summary="The limits this instance enforces")
 async def limits(ctx: Ctx) -> LimitsBody:
-    data = ctx.settings.model_dump(mode="json", exclude={"host", "port", "trust_proxy_headers"})
+    data = ctx.settings.model_dump(mode="json", exclude={"host", "port", "version", "trust_proxy_headers"})
     data["allowed_ports"] = sorted(ctx.settings.allowed_ports)
     return {
         "limits": data,
@@ -117,8 +117,9 @@ async def limits(ctx: Ctx) -> LimitsBody:
 
 
 @router.get("/healthz", include_in_schema=False)
-async def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+async def healthz(ctx: Ctx) -> dict[str, str]:
+    """Liveness, plus the running commit so a deploy can confirm the new version is live."""
+    return {"status": "ok", "version": ctx.settings.version}
 
 
 @router.get("/metrics", include_in_schema=False)

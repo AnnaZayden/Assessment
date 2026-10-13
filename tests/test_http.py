@@ -177,7 +177,7 @@ def test_unexpected_error_is_generic_500(make_client, upstream, monkeypatch):
 def test_healthz(client):
     r = client.get("/healthz")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    assert r.json() == {"status": "ok", "version": "dev"}
 
 
 def test_index_serves_ui(client):

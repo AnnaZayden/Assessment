@@ -10,8 +10,12 @@ from typing import Annotated, Any, Self
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 ENV_PREFIX = "IMG_"
-# Hosting platforms set these without our prefix, so they are accepted as aliases.
-PLATFORM_ALIASES = {"host": "HOST", "port": "PORT"}
+# Hosting platforms set these without our prefix, so they are accepted as aliases (first non-empty wins).
+PLATFORM_ALIASES: dict[str, tuple[str, ...]] = {
+    "host": ("HOST",),
+    "port": ("PORT",),
+    "version": ("RENDER_GIT_COMMIT", "GIT_COMMIT"),  # Render sets the first; our Docker build sets the second
+}
 
 Positive = Annotated[int, Field(gt=0)]
 PositiveSeconds = Annotated[float, Field(gt=0)]
@@ -23,6 +27,7 @@ class Settings(BaseModel):
     # --- Server ------------------------------------------------------------
     host: str = "127.0.0.1"
     port: Annotated[int, Field(ge=1, le=65535)] = 8000
+    version: str = "dev"  # the deployed commit, reported by /healthz
 
     # --- Fetching untrusted URLs -------------------------------------------
     max_source_bytes: Positive = 15 * 1024 * 1024
@@ -70,8 +75,9 @@ class Settings(BaseModel):
         env = os.environ if environ is None else environ
         values: dict[str, Any] = {}
         for name in cls.model_fields:
-            raw = env.get(ENV_PREFIX + name.upper(), env.get(PLATFORM_ALIASES.get(name, "")))
-            if raw is not None:
+            keys = (ENV_PREFIX + name.upper(), *PLATFORM_ALIASES.get(name, ()))
+            # An empty variable counts as unset, e.g. a build that had no commit to stamp.
+            if raw := next((env[key] for key in keys if env.get(key)), None):
                 values[name] = raw
         known = {ENV_PREFIX + name.upper() for name in cls.model_fields}
         for unknown in sorted(key for key in env if key.startswith(ENV_PREFIX) and key not in known):

@@ -90,3 +90,21 @@ def test_main_module_starts_uvicorn_without_access_log(monkeypatch):
     assert kwargs == {"host": "0.0.0.0", "port": 9123, "access_log": False}
     assert configured == [True]
     assert "/process" in app.openapi()["paths"]
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, "dev"),
+        ({"GIT_COMMIT": "abc123"}, "abc123"),  # stamped by our Docker build
+        ({"GIT_COMMIT": "abc123", "RENDER_GIT_COMMIT": "def456"}, "def456"),  # Render's value wins
+        ({"IMG_VERSION": "v1", "RENDER_GIT_COMMIT": "def456"}, "v1"),  # an explicit setting wins over both
+        ({"GIT_COMMIT": ""}, "dev"),  # an empty build argument counts as unset
+    ],
+)
+def test_version_comes_from_the_deploy_environment(env, expected):
+    assert Settings.from_env(env).version == expected
+
+
+def test_empty_variables_count_as_unset():
+    assert Settings.from_env({"IMG_MAX_SOURCE_BYTES": "", "PORT": ""}) == Settings()
