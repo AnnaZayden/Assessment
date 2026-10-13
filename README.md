@@ -92,20 +92,6 @@ Every error returns JSON in the same shape:
 
 Any limit can be changed with an environment variable, for example `IMG_MAX_SOURCE_BYTES=5000000`.
 
-## Deployment
-
-Every push to `main` goes through these steps:
-
-```
-lint + test + docker  ──►  publish image to ghcr.io  ──►  deploy to Render
-```
-
-To turn on the Render deploy step (one time):
-
-1. On [Render](https://render.com), choose **New → Blueprint** and pick this repo.
-2. Copy the deploy hook URL from the service settings, then run `gh secret set RENDER_DEPLOY_HOOK_URL`.
-3. Run `gh variable set PUBLIC_URL --body https://<your-service>.onrender.com`.
-
 ## Project layout
 
 ```
