@@ -88,8 +88,17 @@
   .samples button::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--dot, var(--ok)); }
   .samples button[data-kind="blocked"] { --dot: var(--bad); }
   .samples button[data-kind="invalid"] { --dot: var(--warn); }
+  .samples button[data-mode="video"] { --dot: var(--accent); }
   .samples button:hover { color: var(--text); border-color: var(--accent); }
   .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+  .mode { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 14px; border-radius: 12px;
+          background: var(--panel-2); border: 1.5px solid var(--border); }
+  .mode input { position: absolute; opacity: 0; pointer-events: none; }
+  .mode label { display: flex; align-items: center; justify-content: center; gap: 7px; margin: 0; height: 36px;
+                border-radius: 9px; cursor: pointer; color: var(--muted); font-size: 14px; transition: background .15s, color .15s; }
+  .mode label:hover { color: var(--text); }
+  .mode input:checked + label { background: var(--panel); color: var(--accent); box-shadow: var(--shadow); }
+  .mode input:focus-visible + label { box-shadow: 0 0 0 3px var(--ring); }
   button.primary { margin-top: 22px; width: 100%; height: 46px; border: 0; border-radius: 12px; cursor: pointer;
                    font: inherit; font-weight: 700; font-size: 15px; color: #fff;
                    background: linear-gradient(135deg, var(--accent), var(--accent-2));
@@ -129,6 +138,7 @@
   .stage { min-height: 300px; display: grid; place-items: center; border-radius: 12px; overflow: hidden; padding: 14px;
            background: var(--panel-2) repeating-conic-gradient(var(--checker) 0 25%, transparent 0 50%) 0 0 / 18px 18px;
            border: 1px solid var(--border); }
+  .stage video { max-width: 100%; max-height: 440px; display: block; border-radius: 6px; background: #000; }
   .stage img { max-width: 100%; max-height: 440px; display: block; border-radius: 6px;
                box-shadow: 0 10px 30px rgba(15, 23, 42, .18); }
   .stage a.zoom { display: block; cursor: zoom-in; transition: transform .2s; }
@@ -180,7 +190,7 @@
       </div>
       <div>
         <h1>Image Processing Service</h1>
-        <p class="tagline">Resize and convert any public image by URL. Every result is a plain <code>GET</code> you can drop into an <code>&lt;img&gt;</code> tag.</p>
+        <p class="tagline">Resize and convert any public image by URL, or grab a frame from a video. Every result is a plain <code>GET</code> you can drop into an <code>&lt;img&gt;</code> tag.</p>
       </div>
     </div>
     <nav>
@@ -192,8 +202,14 @@
   <div class="layout">
     <form class="card" id="form">
       <div class="step"><b>1</b>Source</div>
+      <div class="mode" role="radiogroup" aria-label="Source type">
+        <input type="radio" name="mode" id="mode-image" value="image" checked>
+        <label for="mode-image"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>Image</label>
+        <input type="radio" name="mode" id="mode-video" value="video">
+        <label for="mode-video"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="14" height="14" rx="2"/><path d="m16 10 6-3v10l-6-3"/></svg>Video</label>
+      </div>
       <div class="field">
-        <label for="url">Image URL</label>
+        <label for="url" id="url-label">Image URL</label>
         <div class="with-icon">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
           <input id="url" name="url" type="url" required placeholder="https://example.com/photo.jpg">
@@ -203,7 +219,13 @@
           <button type="button" data-url="https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png">Transparent PNG</button>
           <button type="button" data-kind="blocked" data-url="http://169.254.169.254/latest/meta-data/">Blocked: metadata IP</button>
           <button type="button" data-kind="invalid" data-url="https://example.com/">Not an image</button>
+          <button type="button" data-mode="video" data-url="https://www.w3schools.com/html/mov_bbb.mp4">Video (MP4)</button>
         </div>
+      </div>
+      <div class="field" id="time-field" hidden>
+        <label for="time">Time</label>
+        <div class="with-unit"><input id="time" name="time" type="number" min="0" step="0.1" placeholder="0 (first frame)"><span>sec</span></div>
+        <p class="hint">Which moment of the video to turn into an image.</p>
       </div>
 
       <div class="step"><b>2</b>Size</div>
@@ -225,7 +247,7 @@
         <div>
           <label for="format">Format</label>
           <select id="format" name="format">
-            <option value="">same as source</option>
+            <option value="" id="format-default">same as source</option>
             <option value="auto">auto (best your browser accepts)</option>
             <option>jpeg</option><option>png</option><option>webp</option><option>avif</option><option>gif</option>
           </select>
@@ -274,6 +296,11 @@
 <script>
   const form = document.getElementById("form");
   const fields = ["url", "width", "height", "crop", "format", "quality"];
+  const VIDEO_EXTENSIONS = /\.(mp4|m4v|mov|webm|mkv|avi)$/i;
+  const IMAGE_EXTENSIONS = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+  const timeField = document.getElementById("time-field");
+  const urlLabel = document.getElementById("url-label");
+  const formatDefault = document.getElementById("format-default");
   const requestUrl = document.getElementById("request-url");
   const requestCurl = document.getElementById("request-curl");
   const stage = document.getElementById("stage");
@@ -293,13 +320,35 @@
     off: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20"/><path d="M10.4 4H19a2 2 0 0 1 2 2v8.6M21 19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5"/></svg>',
   };
 
+  function isVideo() { return form.elements.mode.value === "video"; }
+  function noun() { return isVideo() ? "video" : "image"; }
+
+  function setMode(mode) {
+    form.elements.mode.value = mode;
+    const video = mode === "video";
+    timeField.hidden = !video;
+    urlLabel.textContent = video ? "Video URL" : "Image URL";
+    form.elements.url.placeholder = video ? "https://example.com/clip.mp4" : "https://example.com/photo.jpg";
+    formatDefault.textContent = video ? "jpeg (default for video)" : "same as source";
+    submit.textContent = `Process ${noun()}`;
+    refreshPreview();
+  }
+
+  // Pasting a link that obviously points at a video (or an image) picks the matching mode.
+  function guessMode() {
+    let path = "";
+    try { path = new URL(form.elements.url.value.trim()).pathname; } catch { return; }
+    if (VIDEO_EXTENSIONS.test(path) && !isVideo()) setMode("video");
+    else if (IMAGE_EXTENSIONS.test(path) && isVideo()) setMode("image");
+  }
+
   function buildPath() {
     const params = new URLSearchParams();
-    for (const name of fields) {
+    for (const name of isVideo() ? [...fields, "time"] : fields) {
       const value = form.elements[name].value.trim();
       if (value) params.set(name, value);
     }
-    return "/process?" + params.toString();
+    return (isVideo() ? "/video/thumbnail?" : "/process?") + params.toString();
   }
 
   function fullUrl() { return location.origin + buildPath(); }
@@ -334,14 +383,14 @@
   }
 
   function showEmpty() {
-    originalStage.replaceChildren(placeholder("The source image appears here.", { icon: "image" }));
-    stage.replaceChildren(placeholder("Pick a sample or paste an image URL, then press Process image.", { icon: "sparkle" }));
+    originalStage.replaceChildren(placeholder("The source appears here.", { icon: "image" }));
+    stage.replaceChildren(placeholder("Pick a sample or paste an image or video URL, then press Process.", { icon: "sparkle" }));
     hideDetails();
   }
 
   function showLoading() {
     originalStage.replaceChildren(placeholder("Fetching source…", { loading: true }));
-    stage.replaceChildren(placeholder("Processing…", { loading: true }));
+    stage.replaceChildren(placeholder(isVideo() ? "Grabbing the frame…" : "Processing…", { loading: true }));
     hideDetails();
   }
 
@@ -393,6 +442,31 @@
     return ratio >= 2 ? `${sign}${percent}% (${ratio.toFixed(1)}× larger)` : `${sign}${percent}%`;
   }
 
+  function showOriginalVideo(sourceUrl, time, headers) {
+    // The real video, paused on the frame that was grabbed, so the two panes can be compared.
+    const video = document.createElement("video");
+    video.controls = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.setAttribute("referrerpolicy", "no-referrer");
+    video.onerror = () => originalStage.replaceChildren(placeholder(
+      "This browser can't play the video here (the host may block it, or the codec isn't supported), but the API read it fine.", { icon: "off" }));
+    // #t=N is a media fragment — the browser starts at that second before buffering begins.
+    // Also set currentTime in onseeked as a fallback for servers that ignore the fragment.
+    video.onseeked = () => { video.onseeked = null; };
+    video.onloadedmetadata = () => { if (video.currentTime !== time) video.currentTime = time; };
+    video.src = sourceUrl + (time > 0 ? `#t=${time}` : "");
+    originalStage.replaceChildren(video);
+    originalScale.textContent = `Original video, paused at ${time}s. Press play to watch it.`;
+    originalScale.hidden = false;
+    showMeta(originalMeta, [
+      ["Dimensions", `${headers.get("X-Source-Width")} × ${headers.get("X-Source-Height")}`],
+      ["Format", "video"],
+      ["Size", formatBytes(Number(headers.get("X-Source-Bytes")))],
+    ]);
+  }
+
   function showOriginal(sourceUrl, headers) {
     // Loaded straight from the source so it is shown untouched; its details come from the API's X-Source-* headers.
     const img = new Image();
@@ -422,7 +496,7 @@
     pre.textContent = JSON.stringify(body, null, 2);
     box.append(title, msg, pre);
     stage.replaceChildren(box);
-    originalStage.replaceChildren(placeholder("No source image to show.", { icon: "off" }));
+    originalStage.replaceChildren(placeholder(`No source ${noun()} to show.`, { icon: "off" }));
     originalScale.hidden = processedScale.hidden = true;
   }
 
@@ -437,14 +511,18 @@
     }
   }
 
-  form.addEventListener("input", refreshPreview);
+  form.addEventListener("input", (e) => {
+    if (e.target === form.elements.url) guessMode();
+    refreshPreview();
+  });
+  for (const radio of form.elements.mode) radio.addEventListener("change", () => setMode(radio.value));
   form.addEventListener("change", refreshPreview);
 
   document.getElementById("samples").addEventListener("click", (e) => {
     const url = e.target.dataset && e.target.dataset.url;
     if (!url) return;
     form.elements.url.value = url;
-    refreshPreview();
+    setMode(e.target.dataset.mode || "image");
   });
 
   for (const button of document.querySelectorAll("[data-copy]")) button.addEventListener("click", async (e) => {
@@ -479,7 +557,9 @@
       img.alt = "Processed result";
       img.onload = () => showPreview(stage, processedScale, img, objectUrl);
       img.src = objectUrl;
-      showOriginal(form.elements.url.value.trim(), res.headers);
+      const sourceUrl = form.elements.url.value.trim();
+      if (isVideo()) showOriginalVideo(sourceUrl, Number(form.elements.time.value) || 0, res.headers);
+      else showOriginal(sourceUrl, res.headers);
       const sourceBytes = Number(res.headers.get("X-Source-Bytes"));
       meta.dataset.delta = blob.size < sourceBytes ? "smaller" : blob.size > sourceBytes ? "larger" : "same";
       showMeta(meta, [
@@ -499,7 +579,7 @@
       showError(0, { error: { code: "network_error", message: String(err) } });
     } finally {
       submit.disabled = false;
-      submit.textContent = "Process image";
+      submit.textContent = `Process ${noun()}`;
     }
   });
 
