@@ -1,15 +1,22 @@
-name: CI
+name: CI/CD
+
+# Every push and pull request is checked (lint, test, docker).
+# Pushes to main that pass every check are then published to the GitHub Container
+# Registry (publish) and deployed to Render (deploy).
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -22,8 +29,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -38,11 +45,68 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: docker build -t image-service .
-      - name: Container starts and passes its health check
+      - uses: actions/checkout@v7
+      - run: docker build --build-arg GIT_COMMIT=${{ github.sha }} -t image-service .
+      - name: Container starts, passes its health check and reports this commit
         run: |
           docker run -d --name svc -p 8000:8000 image-service
           for _ in $(seq 30); do curl -fs localhost:8000/healthz && break; sleep 1; done
-          curl -fs localhost:8000/healthz
+          curl -fs localhost:8000/healthz | grep -q '"version":"${{ github.sha }}"'
           curl -fs localhost:8000/limits > /dev/null
+
+  publish:
+    needs: [lint, test, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io with the workflow's own token; no secret needed
+    steps:
+      - uses: actions/checkout@v7
+      - id: image
+        name: Image name (registry paths must be lowercase)
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          build-args: GIT_COMMIT=${{ github.sha }}
+          tags: |
+            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    concurrency:
+      group: production # one deploy at a time; never cancel one halfway
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }} # secret: it can trigger deploys
+      PUBLIC_URL: ${{ vars.PUBLIC_URL }} # repository variable, e.g. https://ours-image-service.onrender.com
+    steps:
+      - name: Not configured yet
+        if: env.DEPLOY_HOOK == ''
+        run: echo "::notice::Deploy skipped. Add the RENDER_DEPLOY_HOOK_URL secret to enable it (see README, Deployment)."
+      - name: Trigger the Render deploy
+        if: env.DEPLOY_HOOK != ''
+        run: curl -fsS -X POST "$DEPLOY_HOOK" > /dev/null
+      - name: Wait until this commit is live, then smoke-test it
+        if: env.DEPLOY_HOOK != '' && env.PUBLIC_URL != ''
+        timeout-minutes: 20
+        run: |
+          until curl -fs "$PUBLIC_URL/healthz" | grep -q '"version":"${{ github.sha }}"'; do
+            echo "waiting for ${{ github.sha }} to go live..."; sleep 20
+          done
+          curl -fs "$PUBLIC_URL/limits" > /dev/null
+          curl -fs -o /dev/null -w "process: %{http_code} %{content_type}\n" \
+            "$PUBLIC_URL/process?url=https://picsum.photos/id/1025/1600/1067&width=200&format=webp"
+          echo "::notice::Live at $PUBLIC_URL"

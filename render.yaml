@@ -1,0 +1,25 @@
+# Render blueprint: Render → New → Blueprint, then pick this repository.
+# Deploys are triggered by CI (the deploy job in .github/workflows/ci.yml) only after all checks pass.
+services:
+  - type: web
+    name: ours-image-service
+    runtime: docker
+    plan: free
+    branch: main
+    autoDeploy: false # CI decides when to deploy, so a failing commit never goes live
+    healthCheckPath: /healthz
+    envVars:
+      # Render's proxy appends the real client IP to X-Forwarded-For; without this,
+      # every visitor would share one rate-limit bucket (the proxy's address).
+      - key: IMG_TRUST_PROXY_HEADERS
+        value: "true"
+      # The free plan has 512 MB of RAM. Worst case per in-flight request: a 15 MB source
+      # buffer while fetching, and ~160 MB decoded (40 MP RGBA). These keep the total well under it.
+      - key: IMG_MAX_CONCURRENT_DECODES
+        value: "1"
+      - key: IMG_MAX_CONCURRENT_FETCHES
+        value: "4"
+      - key: IMG_MAX_PENDING_RENDERS
+        value: "16"
+      - key: IMG_CACHE_MAX_BYTES
+        value: "50000000"
