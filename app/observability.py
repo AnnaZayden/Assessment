@@ -12,7 +12,10 @@ from datetime import UTC, datetime
 from typing import Final
 
 REQUEST_ID_HEADER: Final = "X-Request-ID"
+# Only accept request IDs that look safe to echo into headers and log files (no special characters).
 _VALID_REQUEST_ID: Final = re.compile(r"[A-Za-z0-9._-]{1,64}")
+# ContextVar stores the current request ID per-async-task so every log line within a request
+# automatically includes it without needing to pass it around explicitly.
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
 # Upper bounds (seconds) of the request-latency histogram buckets.
@@ -58,12 +61,21 @@ def configure_logging(level: int = logging.INFO) -> None:
 
 
 class Metrics:
-    """In-process counters and a latency histogram, rendered in the Prometheus text format."""
+    """In-process counters and a latency histogram, rendered in the Prometheus text format.
+
+    All metrics are plain Python Counters — no external library needed.
+    /metrics renders them in the Prometheus text exposition format so any
+    Prometheus-compatible scraper (Grafana, Datadog, etc.) can consume them.
+    """
 
     def __init__(self) -> None:
+        # Keyed by (route, method, status_code) — e.g. ("/process", "GET", 200)
         self._requests: Counter[tuple[str, str, int]] = Counter()
+        # Keyed by error code string — e.g. "rate_limited", "corrupt_image"
         self._errors: Counter[str] = Counter()
+        # Keyed by cache status string — "HIT", "MISS", "COALESCED"
         self._cache: Counter[str] = Counter()
+        # Histogram: keyed by (route, upper_bound_seconds)
         self._latency_buckets: Counter[tuple[str, float]] = Counter()
         self._latency_sum: defaultdict[str, float] = defaultdict(float)
         self._latency_count: Counter[str] = Counter()
@@ -72,6 +84,8 @@ class Metrics:
         self._requests[route, method, status] += 1
         self._latency_sum[route] += seconds
         self._latency_count[route] += 1
+        # A histogram bucket at bound X counts all requests that finished in ≤ X seconds.
+        # Prometheus expects cumulative counts (each bucket includes all faster ones).
         for bound in LATENCY_BUCKETS_S:
             if seconds <= bound:
                 self._latency_buckets[route, bound] += 1

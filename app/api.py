@@ -107,10 +107,12 @@ async def video_thumbnail(request: Request, ctx: Ctx) -> Response:
 
 
 async def render(request: Request, ctx: Ctx, *, video: bool) -> Response:
+    # Parse and validate all query parameters. Raises ApiError on any problem.
     params = parse_process_params(
         request.query_params.multi_items(), ctx.settings, request.headers.get("accept"), video=video
     )
     log_fields = request_info(request).log_fields
+    # Log only the hostname, not the full URL — full URLs can contain auth tokens or personal data in paths.
     log_fields["source_host"] = source_host(params.url)
     image, cache_status = await ctx.service.get(params)
     ctx.metrics.observe_cache(cache_status)
@@ -160,28 +162,34 @@ def image_response(
 ) -> Response:
     headers = {
         **request_info(request).rate_headers,
-        "Cache-Control": f"public, max-age={settings.http_max_age_s}",
-        "ETag": image.etag,
-        "X-Cache": cache_status.value,
+        "Cache-Control": f"public, max-age={settings.http_max_age_s}",  # tell CDNs/browsers to cache
+        "ETag": image.etag,             # hash of the output bytes, for conditional requests
+        "X-Cache": cache_status.value,  # HIT/MISS/COALESCED — useful for debugging
+        # Source and output dimensions exposed so callers can verify what they got.
         "X-Image-Width": str(image.width),
         "X-Image-Height": str(image.height),
         "X-Source-Format": image.source.format,
         "X-Source-Width": str(image.source.width),
         "X-Source-Height": str(image.source.height),
         "X-Source-Bytes": str(image.source.bytes),
+        # Prevents browsers from sniffing the content type (security header).
         "X-Content-Type-Options": "nosniff",
         "Content-Disposition": f'inline; filename="image.{image.format}"',
     }
     if params.negotiated:
-        headers["Vary"] = "Accept"  # the same URL gives different bytes to different browsers
+        # When format=auto, different browsers get different formats (AVIF vs WebP vs JPEG).
+        # Vary: Accept tells CDNs to cache a separate copy per Accept header value.
+        headers["Vary"] = "Accept"
     if etag_matches(request.headers.get("if-none-match"), image.etag):
+        # Client already has this version — return 304 Not Modified (no body) to save bandwidth.
         return Response(status_code=304, headers=headers)
     return Response(image.data, media_type=image.content_type, headers=headers)
 
 
 def client_ip(request: Request, settings: Settings) -> str:
     if settings.trust_proxy_headers and (forwarded := request.headers.get("x-forwarded-for")):
-        # The right-most entry is the one our own proxy appended; the rest are client-controlled.
+        # X-Forwarded-For can be spoofed by clients. When behind a trusted proxy, use the
+        # right-most entry (the one our proxy added), not the left-most (which is client-controlled).
         return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 

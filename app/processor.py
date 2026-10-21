@@ -13,14 +13,16 @@ from .errors import ApiError, ErrorCode
 from .formats import INPUT_FORMATS, LOSSY_FORMATS, MIME_TYPES, OUTPUT_FORMATS, RGB_ONLY_FORMATS, OutputFormat
 from .params import ProcessParams
 
+# LANCZOS gives the best quality when downscaling (sharp edges, no aliasing).
 RESAMPLE: Final = Image.Resampling.LANCZOS
-# Pillow: a reducing_gap of 3 or more is indistinguishable from full Lanczos, and much faster on big shrinks.
+# reducing_gap=3 pre-shrinks the image in steps before full LANCZOS, making large downscales
+# much faster while being visually indistinguishable from a full-quality resize.
 REDUCING_GAP: Final = 3.0
 WEBP_METHOD: Final = 4  # 0 = fastest .. 6 = smallest; 4 is Pillow's default trade-off
-PNG_COMPRESS_LEVEL: Final = 6  # zlib's default trade-off
+PNG_COMPRESS_LEVEL: Final = 6  # zlib's default trade-off (speed vs. file size)
 WHITE: Final = (255, 255, 255)
-SIXTEEN_TO_EIGHT_BITS: Final = 256  # scale 16-bit grey samples down to 8 bits
-# Errors Pillow raises for truncated or malformed data, at open() or load() time.
+SIXTEEN_TO_EIGHT_BITS: Final = 256  # divisor to scale 16-bit grey samples down to 8 bits
+# All the errors Pillow can raise for truncated or malformed image data, at open() or load() time.
 DECODE_ERRORS: Final = (OSError, ValueError, SyntaxError, EOFError)
 
 ColorFamily = Literal["gray", "rgb", "other"]
@@ -47,16 +49,20 @@ class ProcessedImage:
 
 
 def process_image(data: bytes, params: ProcessParams, settings: Settings) -> ProcessedImage:
+    """Main entry point: decode → normalise → resize → strip metadata → encode."""
     img, source = _decode(data, settings)
+    # Save the ICC colour profile before we clear img.info below.
     icc_profile = img.info.get("icc_profile")
     source_family = _color_family(img.mode)
 
     img = _resize(_normalize_mode(img), params, settings)
     out_format = params.format or _default_output_format(source.format)
+    # Prepare the pixel mode for the chosen encoder (e.g. JPEG can't store alpha).
     img = _prepare_for_encoder(img, out_format)
 
-    # Strip all metadata (EXIF incl. GPS, XMP, text chunks, GIF comments). Only keep the ICC
-    # profile, and only if it still describes the pixel data.
+    # Strip ALL metadata: EXIF (including GPS), XMP, text chunks, GIF comments.
+    # ICC profiles describe the colour space; they're harmless to keep — but only if the
+    # colour family hasn't changed (e.g. converting CMYK to RGB invalidates the profile).
     img.info = {}
     if source_family == "other" or _color_family(img.mode) != source_family:
         icc_profile = None
@@ -69,6 +75,7 @@ def process_image(data: bytes, params: ProcessParams, settings: Settings) -> Pro
 def _decode(data: bytes, settings: Settings) -> tuple[Image.Image, SourceInfo]:
     """Open with only our allowed decoders, check the pixel count from the header, then decode upright."""
     try:
+        # formats= restricts Pillow to only the decoders we explicitly allow (no BMP, TIFF, etc.).
         source = Image.open(io.BytesIO(data), formats=INPUT_FORMATS)
     except UnidentifiedImageError:
         supported = ", ".join(f.lower() for f in INPUT_FORMATS)
@@ -82,14 +89,18 @@ def _decode(data: bytes, settings: Settings) -> tuple[Image.Image, SourceInfo]:
         raise _corrupt() from None
 
     with source:
-        width, height = source.size  # read from the header; nothing decoded yet
+        # Image.open() is lazy — it only reads the header. Check pixel count before decoding
+        # the full image to prevent memory exhaustion attacks (e.g. a 100k×100k PNG).
+        width, height = source.size
         if width * height > settings.max_input_pixels:
             raise _too_many_pixels(
                 f"Source image is {width}x{height} ({width * height:,} pixels); "
                 f"the limit is {settings.max_input_pixels:,} pixels."
             )
         try:
-            source.load()  # first frame only for animated images
+            source.load()  # decode the first frame only (animated GIFs etc. are truncated here)
+            # Rotate the image according to its EXIF orientation tag so a photo taken sideways
+            # comes out the right way up regardless of the output format.
             img = ImageOps.exif_transpose(source)
         except DECODE_ERRORS:
             raise _corrupt() from None

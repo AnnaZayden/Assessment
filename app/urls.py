@@ -50,15 +50,19 @@ def _parts_problem(parts: SplitResult, port: int | None, settings: Settings) -> 
 def is_public_ip(ip: IPAddress) -> bool:
     """True only for globally routable unicast addresses.
 
-    Rejects loopback, RFC 1918, link-local (incl. cloud metadata 169.254.169.254),
-    CGNAT, multicast, reserved, unspecified, and IPv6 forms that embed an IPv4
-    address (mapped, 6to4, NAT64) when that embedded address is not public.
+    Rejects loopback (127.x), RFC 1918 private (10.x, 172.16.x, 192.168.x),
+    link-local (169.254.x — including the AWS/GCP metadata server at 169.254.169.254),
+    CGNAT (100.64.x), multicast, reserved, unspecified, and IPv6 forms that embed an
+    IPv4 address (mapped, 6to4, NAT64) when that embedded address is not public.
+
     The IPv6 unwrapping repeats what recent Python versions already do; it is kept
     so the guarantee does not depend on the interpreter version.
     """
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.teredo:
+            # Teredo encodes an IPv4 address; we'd need to extract and check it — easier to just block.
             return False
+        # IPv6 addresses that embed an IPv4 address are only public if the embedded address is public.
         embedded = ip.ipv4_mapped or ip.sixtofour
         if embedded is None and ip in _NAT64:
             embedded = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)

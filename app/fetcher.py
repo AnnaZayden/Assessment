@@ -6,6 +6,11 @@ Each hop (initial URL and every redirect):
   3. connect to the exact IP we checked (Host header + TLS SNI keep the
      original name), so DNS cannot change between check and connect.
 The body is streamed and abandoned as soon as it exceeds the size limit.
+
+Why all this complexity?
+Without it a caller could say "fetch http://192.168.1.1/secret" and the
+service would happily reach their internal network. This is called SSRF
+(Server-Side Request Forgery) — one of the most common cloud vulnerabilities.
 """
 
 from __future__ import annotations
@@ -62,12 +67,15 @@ class Fetcher:
         self._client = httpx.AsyncClient(
             transport=transport,
             verify=ssl_context or True,
-            follow_redirects=False,  # we follow manually so every hop is re-checked
-            trust_env=False,  # an env proxy would bypass IP pinning
+            # Don't let httpx follow redirects automatically — we re-check each redirect URL ourselves
+            # to ensure no redirect leads to a private address.
+            follow_redirects=False,
+            # An environment proxy (HTTP_PROXY etc.) would route traffic around our IP-pinning check.
+            trust_env=False,
             timeout=httpx.Timeout(settings.fetch_timeout_s, connect=settings.connect_timeout_s),
-            # No keep-alive: pooled connections are keyed by IP, so a connection
-            # opened (and TLS-verified) for a.com could be reused for b.com on
-            # the same CDN IP.
+            # Keep-alive disabled: pooled connections are keyed by IP, so a connection opened
+            # (and TLS-verified) for a.com could be reused for b.com if they share a CDN IP.
+            # Disabling this ensures each connection goes to the IP we just verified.
             limits=httpx.Limits(max_keepalive_connections=0),
             headers={"User-Agent": USER_AGENT},
         )
@@ -119,6 +127,13 @@ class Fetcher:
         )
 
     async def _pinned_request(self, url: str, *, via_redirect: bool) -> httpx.Request:
+        """Build a request that connects directly to the resolved IP, not the hostname.
+
+        IP pinning prevents a TOCTOU (time-of-check/time-of-use) attack where DNS could
+        return a safe IP during our check but a private IP when we actually connect.
+        We put the original hostname in the Host header and SNI so TLS verification and
+        virtual hosting still work correctly despite connecting to the raw IP.
+        """
         if problem := url_problem(url, self._settings):
             if via_redirect:
                 raise ApiError(ErrorCode.URL_NOT_ALLOWED, f"Source redirected to a disallowed URL: {problem}")
@@ -128,13 +143,17 @@ class Fetcher:
         scheme = parts.scheme.lower()
         host = parts.hostname or ""
         port = parts.port or DEFAULT_PORTS[scheme]
+        # Resolve and validate the IP before we connect to it.
         ip = await self._resolve_checked(host, port, via_redirect=via_redirect)
 
         ip_host = f"[{ip}]" if isinstance(ip, ipaddress.IPv6Address) else str(ip)
         netloc = ip_host if parts.port is None else f"{ip_host}:{port}"
         named_host = f"[{host}]" if ":" in host else host  # IPv6 literals keep their brackets in Host
         host_header = named_host if parts.port is None else f"{named_host}:{port}"
+        # Replace the hostname in the URL with the raw IP so httpx connects to the IP we checked.
         pinned_url = urlunsplit((scheme, netloc, parts.path or "/", parts.query, ""))
+        # For HTTPS, tell httpx to use the original hostname for TLS SNI (server name indication),
+        # otherwise the certificate check would fail because it expects a hostname, not an IP.
         extensions = {"sni_hostname": host} if scheme == "https" else {}
         return self._client.build_request(
             "GET", pinned_url, headers={"Host": host_header}, extensions=extensions
@@ -142,6 +161,7 @@ class Fetcher:
 
     async def _resolve_checked(self, host: str, port: int, *, via_redirect: bool) -> IPAddress:
         try:
+            # If the host is already an IP literal (e.g. "1.2.3.4"), skip DNS entirely.
             addresses = [ipaddress.ip_address(host)]
         except ValueError:
             try:
@@ -152,8 +172,8 @@ class Fetcher:
             if not addresses:
                 raise ApiError(ErrorCode.DNS_ERROR, f"Could not resolve host '{host}'.") from None
 
-        # Refuse if *any* address is internal, rather than picking a public one:
-        # a host that resolves to both is suspicious.
+        # Reject if *any* resolved address is internal — not just the first one.
+        # A hostname that resolves to both a public and a private IP is suspicious (DNS rebinding attack).
         if not all(is_public_ip(a) for a in addresses):
             where = "Source redirected to" if via_redirect else "URL points to"
             raise ApiError(
@@ -168,11 +188,13 @@ class Fetcher:
         too_large = ApiError(
             ErrorCode.SOURCE_TOO_LARGE, f"Source {kind} is larger than the {_human_bytes(limit)} limit."
         )
+        # Fast path: if Content-Length already tells us the file is too big, reject before downloading.
         declared = response.headers.get("content-length", "")
         if declared.isdigit() and int(declared) > limit:
             raise too_large
         buf = bytearray()
-        # aiter_bytes() yields *decoded* bytes, so a gzip bomb is capped too.
+        # Stream the body in chunks and stop the moment we exceed the limit.
+        # aiter_bytes() yields *decoded* bytes, so a gzip bomb (tiny compressed, huge decompressed) is also caught.
         async for chunk in response.aiter_bytes():
             buf += chunk
             if len(buf) > limit:
